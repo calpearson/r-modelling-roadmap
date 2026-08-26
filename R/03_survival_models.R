@@ -33,7 +33,7 @@ out_cox_zph
 #   - grouped KM curves
 #   - single-group KM curves
 #   - median survival extraction
-#   - optional KM plot
+#   - optional survminer plot
 #
 # ============================================================
 
@@ -70,10 +70,12 @@ explain_km <- function(
   diagnostics <- character(0)
   
   if (any(km_fit$n < 10)) {
+    
     diagnostics <- c(
       diagnostics,
       "one or more groups contain very few patients (<10), making survival estimates potentially unstable."
     )
+    
   }
   
   if (length(diagnostics) > 0) {
@@ -85,6 +87,7 @@ explain_km <- function(
     for (d in diagnostics) {
       cat(bold("WARNING:"), d, "\n\n")
     }
+    
   }
   
   # ==========================================================
@@ -129,6 +132,7 @@ explain_km <- function(
         strata_names[i],
         format(km_fit$strata[i], big.mark = ",")
       ))
+      
     }
     
     cat("\n")
@@ -168,7 +172,9 @@ explain_km <- function(
             rownames(km_table)[i],
             med
           ))
+          
         }
+        
       }
       
     } else {
@@ -185,10 +191,13 @@ explain_km <- function(
           "Median survival = %.2f time units\n",
           med
         ))
+        
       }
+      
     }
     
     cat("\n")
+    
   }
   
   # ==========================================================
@@ -211,7 +220,7 @@ explain_km <- function(
     ))
     
     cat(sprintf(
-      "Degrees of freedom  = %d\n",
+      "Degrees of freedom = %d\n",
       df
     ))
     
@@ -244,37 +253,37 @@ explain_km <- function(
       
       cat("Any observed separation between the Kaplan-Meier\n")
       cat("curves could plausibly have arisen by random chance.\n\n")
+      
     }
+    
   }
   
   # ==========================================================
-  # OPTIONAL PLOT
+  # OPTIONAL SURVMINER PLOT
   # ==========================================================
   
   if (isTRUE(km_plot)) {
     
-    plot(
-      km_fit,
-      lwd = 2,
-      mark.time = TRUE,
-      xlab = "Time",
-      ylab = "Survival Probability",
-      main = "Kaplan-Meier Survival Curves"
-    )
-    
-    if (!is.null(strata_names)) {
+    if (!requireNamespace("survminer", quietly = TRUE)) {
       
-      legend(
-        "bottomleft",
-        legend = strata_names,
-        lwd = 2,
-        bty = "n"
+      warning(
+        "Package 'survminer' is not installed. Install it with install.packages('survminer')."
       )
+      
+    } else {
+      
+      print(
+        survminer::ggsurvplot(
+          km_fit
+        )
+      )
+      
     }
+    
   }
   
   # ==========================================================
-  # SUMMARY TABLE
+  # SUMMARY
   # ==========================================================
   
   cat("========================================================\n")
@@ -284,9 +293,14 @@ explain_km <- function(
   cat("differences in patient characteristics.\n")
   cat("========================================================\n")
   
-  invisible(km_table)
+  invisible(
+    list(
+      survfit_object = km_fit,
+      summary_table = km_table
+    )
+  )
+  
 }
-
 
 
 # ============================================================
@@ -890,6 +904,12 @@ explain_km(
   logrank = out_km_logrank,
   km_plot = TRUE
 )
+
+# another nice way to do this
+library(survminer)
+ggsurvplot(out_km_fit)
+
+
 
 library(survival)
 
