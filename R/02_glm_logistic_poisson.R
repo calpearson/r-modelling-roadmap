@@ -49,6 +49,12 @@ out_nb_summary
 #  - Runs a battery of pre-flight sanity checks before saying
 #    anything, and reports on anything that looks like it could
 #    make the numbers unreliable (see full list below)
+#  - Optionally draws a forest plot of the ratios (OR/RR/IRR) with
+#    95% CIs, on the exponentiated (ratio) scale. The reference
+#    line for "no effect" is drawn at 1 — NOT 0 — because 1 is the
+#    null value for ANY ratio (OR, RR, or IRR); 0 is only the null
+#    value on the raw, un-exponentiated log-coefficient scale, which
+#    isn't what a forest plot conventionally shows.
 # ============================================================
 
 # ---- Bold-text helper (safe if crayon isn't installed) ----
@@ -68,7 +74,7 @@ format_pval <- function(p) {
 }
 
 
-explain_glm <- function(model, conf_level = 0.95) {
+explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE) {
   
   # ==========================================================
   # 0. VALIDITY CHECK — is this even a model type we can handle?
@@ -494,7 +500,67 @@ explain_glm <- function(model, conf_level = 0.95) {
   cat("causal effects, and not adjusted for anything left OUT of the model.\n")
   cat("========================================================\n")
   
-  invisible(do.call(rbind, results_rows))
+  results_table <- do.call(rbind, results_rows)
+  
+  # ==========================================================
+  # 6. OPTIONAL FOREST PLOT
+  # Reference/"no effect" line is drawn at 1 — the null value for
+  # ANY ratio (OR, RR, or IRR). This is deliberately NOT 0: 0 would
+  # only be the null value on the raw, un-exponentiated log-odds /
+  # log-rate scale, which this plot does not show.
+  # ==========================================================
+  if (isTRUE(forest_plot)) {
+    
+    if (is.null(results_table) || nrow(results_table) == 0) {
+      warning("forest_plot = TRUE was requested, but there are no estimable terms to plot.")
+    } else {
+      
+      fp_data <- results_table[!is.na(results_table$ratio) &
+                                 !is.na(results_table$lower_ci) &
+                                 !is.na(results_table$upper_ci), ]
+      
+      # Log scale requires strictly positive bounds — guard against a Wald CI
+      # (fallback case) that happened to produce a non-positive lower bound.
+      use_log_scale <- all(fp_data$lower_ci > 0) && all(fp_data$upper_ci > 0) && all(fp_data$ratio > 0)
+      
+      if (nrow(fp_data) == 0) {
+        warning("forest_plot = TRUE was requested, but no terms had usable ratio/CI values to plot (all were NA or non-positive).")
+      } else {
+        
+        n_rows <- nrow(fp_data)
+        y_pos  <- rev(seq_len(n_rows))
+        
+        x_range <- range(c(fp_data$lower_ci, fp_data$upper_ci, 1), na.rm = TRUE)
+        
+        old_par <- par(mar = c(5, max(8, max(nchar(fp_data$variable)) * 0.6), 4, 2))
+        on.exit(par(old_par), add = TRUE)
+        
+        plot(fp_data$ratio, y_pos,
+             xlim = x_range,
+             ylim = c(0.5, n_rows + 0.5),
+             log  = if (use_log_scale) "x" else "",
+             pch  = 16, cex = 1.3,
+             yaxt = "n", ylab = "",
+             xlab = ratio_label,
+             main = sprintf("Forest plot: %s\n(%s)", outcome, ratio_label))
+        
+        axis(2, at = y_pos, labels = fp_data$variable, las = 2, cex.axis = 0.85)
+        
+        segments(fp_data$lower_ci, y_pos, fp_data$upper_ci, y_pos, lwd = 2)
+        
+        # Reference ("no effect") line — always at 1 for a ratio scale
+        abline(v = 1, lty = 2, col = "red", lwd = 1.5)
+        text(x = 1, y = n_rows + 0.5, labels = "no effect", col = "red",
+             pos = 3, xpd = TRUE, cex = 0.8)
+        
+        if (!use_log_scale) {
+          warning("Some CI bounds were zero or negative (likely from a Wald-CI fallback — see diagnostics above), so this plot uses a LINEAR x-axis instead of the conventional log scale. Interpret spacing between points with extra caution.")
+        }
+      }
+    }
+  }
+  
+  invisible(results_table)
 }
 
 
@@ -502,27 +568,31 @@ explain_glm <- function(model, conf_level = 0.95) {
 # USAGE EXAMPLES (using the cohort dataset from earlier)
 # ============================================================
 # --- Logistic regression (binomial, logit link -> Odds Ratios) ---
-model_logit <- glm(mort ~ age + sex + treatment + comorbidity_score,
-                     data = cohort %>% rename(mort=event), family = binomial(link = "logit"))
+model_logit <- glm(event ~ age + sex + treatment + comorbidity_score,
+                    data = cohort, family = binomial(link = "logit"))
 logit_results <- explain_glm(model_logit)
 logit_results
-#
-# --- Poisson with offset (log link -> Incidence Rate Ratios) ---
+
+#--- Poisson with offset (log link -> Incidence Rate Ratios) ---
 model_pois <- glm(n_hosp ~ age + treatment + offset(log(person_time)),
-                    data = cohort, family = poisson(link = "log"))
+                   data = cohort, family = poisson(link = "log"))
 pois_results <- explain_glm(model_pois)
 pois_results
-#
-# --- Negative Binomial (overdispersed counts -> IRRs, with theta note) ---
+
+#--- Negative Binomial (overdispersed counts -> IRRs, with theta note) ---
 library(MASS)
 model_nb <- glm.nb(n_hosp ~ age + treatment + offset(log(person_time)), data = cohort)
 nb_results <- explain_glm(model_nb)
 nb_results
-#
-# --- Interaction term example ---
+
+#--- Interaction term example ---
 model_int <- glm(event ~ age * treatment, data = cohort, family = binomial)
 explain_glm(model_int)
-#
+
+#--- With a forest plot (reference line always at ratio = 1, never 0) ---
+explain_glm(model_logit, forest_plot = TRUE)
+explain_glm(model_pois, forest_plot = TRUE)
+
 # ============================================================
 # EDGE CASES THIS FUNCTION HAS BEEN SPECIFICALLY CHECKED AGAINST
 # ============================================================
@@ -543,4 +613,7 @@ explain_glm(model_int)
 # 15. Negative Binomial via MASS::glm.nb       -> detected via class, theta explained
 # 16. Terms that can't be matched to original data column -> flagged, not silently wrong
 # 17. p-value column naming differences (Pr(>|z|) vs Pr(>|t|)) -> read positionally, not by name
+# 18. forest_plot = TRUE with no estimable terms -> warns instead of erroring
+# 19. forest_plot = TRUE where a Wald-CI fallback produced a non-positive bound
+#     (breaks log-scale plotting) -> auto-switches to linear x-axis, with a warning
 
