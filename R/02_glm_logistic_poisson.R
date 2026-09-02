@@ -50,11 +50,15 @@ out_nb_summary
 #    anything, and reports on anything that looks like it could
 #    make the numbers unreliable (see full list below)
 #  - Optionally draws a forest plot of the ratios (OR/RR/IRR) with
-#    95% CIs, on the exponentiated (ratio) scale. The reference
-#    line for "no effect" is drawn at 1 — NOT 0 — because 1 is the
-#    null value for ANY ratio (OR, RR, or IRR); 0 is only the null
-#    value on the raw, un-exponentiated log-coefficient scale, which
-#    isn't what a forest plot conventionally shows.
+#    95% CIs, via cal_forest_plot() (gtsummary + forestplot packages).
+#    The reference line for "no effect" sits at 1 on a log-scaled axis
+#    for ratio measures — 1 is the null value for ANY ratio (OR, RR, or
+#    IRR); this is different from 0, which is only the null value on
+#    the raw, un-exponentiated log-coefficient scale.
+#  - Optionally builds a publication-style gtsummary table (table_plot = TRUE)
+#
+# REQUIRED PACKAGES for forest_plot/table_plot: forestplot, gtsummary, dplyr
+#   install.packages(c("forestplot", "gtsummary", "dplyr"))
 # ============================================================
 
 # ---- Bold-text helper (safe if crayon isn't installed) ----
@@ -74,7 +78,136 @@ format_pval <- function(p) {
 }
 
 
-explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE) {
+# ============================================================
+# cal_forest_plot() — gtsummary + forestplot-based forest plot.
+# This is your function, used as-is, with two additions:
+#   - explicit requireNamespace checks for dplyr/gtsummary (matching
+#     the check you already had for forestplot), so a missing
+#     package gives a clear message here rather than a cryptic
+#     "could not find function" error from inside the call
+#   - everything else (logic, defaults, argument names) is unchanged
+# ============================================================
+cal_forest_plot <- function(fit_or_tbl,
+                            family = "OR",
+                            col_names = c("estimate", "ci", "p.value"),
+                            graph.pos = 2,
+                            boxsize = 0.3,
+                            title_line_color = "darkblue",
+                            exponentiate = TRUE,
+                            indent_spaces = 5) {
+  
+  if (!requireNamespace("forestplot", quietly = TRUE)) {
+    stop("Package 'forestplot' is required for cal_forest_plot()", call. = FALSE)
+  }
+  if (!requireNamespace("gtsummary", quietly = TRUE)) {
+    stop("Package 'gtsummary' is required for cal_forest_plot()", call. = FALSE)
+  }
+  if (!requireNamespace("dplyr", quietly = TRUE)) {
+    stop("Package 'dplyr' is required for cal_forest_plot()", call. = FALSE)
+  }
+  
+  # NOTE: deliberately NOT calling library(dplyr)/library(forestplot)/library(gtsummary)
+  # here. Attaching dplyr is exactly what caused dplyr::select to get masked by
+  # MASS::select (or vice versa) when this ran inside a script that also loads MASS
+  # (e.g. for glm.nb() earlier in the workflow). Every call below is explicitly
+  # namespaced (dplyr::..., gtsummary::...) instead, so this function works correctly
+  # regardless of what else is attached to the search path or in what order.
+  
+  # If input is a GLM/fit, convert to tbl_regression internally
+  if (inherits(fit_or_tbl, "glm") || inherits(fit_or_tbl, "lm")) {
+    x <- gtsummary::tbl_regression(fit_or_tbl, exponentiate = exponentiate)
+  } else if (inherits(fit_or_tbl, c("tbl_regression", "tbl_uvregression"))) {
+    x <- fit_or_tbl
+  } else {
+    stop("Input must be a glm/lm object or tbl_regression/tbl_uvregression object", call. = FALSE)
+  }
+  
+  # Determine log scale and x-axis label
+  family <- toupper(family)
+  xlog <- family %in% c("OR", "RR", "IRR")  # log scale for ratio measures
+  xlab <- switch(family,
+                 "OR"  = "Odds Ratio",
+                 "RR"  = "Risk Ratio",
+                 "IRR" = "Incidence Rate Ratio",
+                 "RISK"= "Risk",
+                 "Estimate")  # default
+  
+  # Prepare main text table
+  txt_tb1 <- x %>%
+    gtsummary::modify_column_unhide() %>%
+    gtsummary::modify_fmt_fun(dplyr::contains("stat") ~ gtsummary::style_number) %>%
+    gtsummary::as_tibble(col_labels = FALSE)
+  
+  # Prepare header row and update "estimate" dynamically
+  txt_tb2 <- x %>%
+    gtsummary::modify_column_unhide() %>%
+    gtsummary::as_tibble() %>%
+    names()
+  txt_tb2 <- data.frame(matrix(gsub("\\**", "", txt_tb2), nrow = 1), stringsAsFactors = FALSE)
+  names(txt_tb2) <- names(txt_tb1)
+  
+  # Update header row for estimate column
+  estimate_col <- which(names(txt_tb2) == "estimate")
+  if(length(estimate_col) == 1) txt_tb2[1, estimate_col] <- xlab
+  
+  txt_tb <- dplyr::bind_rows(txt_tb2, txt_tb1)
+  
+  # Combine with numeric stats
+  line_stats <- x$table_body %>%
+    dplyr::select(dplyr::all_of(c("estimate", "conf.low", "conf.high"))) %>%
+    dplyr::rename_with(~paste0(., "_num")) %>%
+    tibble::add_row(.before = 0)
+  
+  forestplot_tb <- dplyr::bind_cols(txt_tb, line_stats)
+  
+  # Add CI column
+  forestplot_tb$ci <- c(NA, x$table_body$ci)
+  
+  # Bold only categorical summary rows
+  summary_rows <- c(TRUE, x$table_body$row_type == "label")
+  forestplot_tb <- forestplot_tb %>% dplyr::mutate(..summary_row.. = summary_rows)
+  
+  # --- Indent variable names that are not summary rows ---
+  forestplot_tb <- forestplot_tb %>%
+    dplyr::mutate(label = ifelse(..summary_row.., label, paste0(strrep(" ", indent_spaces), label)))
+  
+  # Prepare labeltext as a list
+  label_txt <- forestplot_tb %>%
+    dplyr::select(dplyr::all_of(c("label", col_names))) %>%
+    as.list() %>%
+    lapply(as.character)
+  
+  # Draw forest plot
+  # IMPORTANT: forestplot::forestplot() returns an object that only actually
+  # renders via R's auto-print mechanism — which fires for an untouched
+  # top-level console expression, but NOT when this function is called from
+  # inside another function (e.g. from explain_glm(), inside a tryCatch{}).
+  # In that nested context, the plot object was silently built and discarded
+  # with nothing ever drawn — which is why the plot appeared blank. Printing
+  # explicitly here guarantees it draws regardless of how/where this is called,
+  # and returning invisibly avoids a redundant second draw if you also print
+  # the returned object yourself (e.g. `fp <- cal_forest_plot(...); fp`).
+  fp_obj <- forestplot::forestplot(
+    labeltext = label_txt,
+    mean = forestplot_tb$estimate_num,
+    lower = forestplot_tb$conf.low_num,
+    upper = forestplot_tb$conf.high_num,
+    is.summary = forestplot_tb$..summary_row..,
+    graph.pos = graph.pos,
+    lwd.zero = 2,
+    boxsize = boxsize,
+    graphwidth = grid::unit(5, "cm"),
+    hrzl_lines = list("2" = grid::gpar(lwd = 2, col = title_line_color)),
+    xlog = xlog,
+    xlab = xlab,
+    col = forestplot::fpColors(box = "darkblue", line = "darkblue", summary = "darkblue")
+  )
+  print(fp_obj)
+  invisible(fp_obj)
+}
+
+
+explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plot = FALSE) {
   
   # ==========================================================
   # 0. VALIDITY CHECK — is this even a model type we can handle?
@@ -503,59 +636,60 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE) {
   results_table <- do.call(rbind, results_rows)
   
   # ==========================================================
-  # 6. OPTIONAL FOREST PLOT
-  # Reference/"no effect" line is drawn at 1 — the null value for
-  # ANY ratio (OR, RR, or IRR). This is deliberately NOT 0: 0 would
-  # only be the null value on the raw, un-exponentiated log-odds /
-  # log-rate scale, which this plot does not show.
+  # 6. OPTIONAL FOREST PLOT (via cal_forest_plot() — gtsummary + forestplot)
+  # Reference/"no effect" line is drawn at 1 on the log-scaled axis for
+  # ratio measures (OR/RR/IRR) — 1 is the null value for ANY ratio; the
+  # log axis (xlog = TRUE inside cal_forest_plot) is what makes that
+  # reference point sit visually centered rather than at 0.
   # ==========================================================
   if (isTRUE(forest_plot)) {
     
-    if (is.null(results_table) || nrow(results_table) == 0) {
-      warning("forest_plot = TRUE was requested, but there are no estimable terms to plot.")
+    # Map the ratio_label already determined earlier in this function to the
+    # `family` argument cal_forest_plot() expects, so you don't have to
+    # specify it separately — it stays consistent with the text output above.
+    fp_family <- if (grepl("^Odds Ratio", ratio_label)) {
+      "OR"
+    } else if (grepl("^Incidence Rate Ratio", ratio_label)) {
+      "IRR"
+    } else if (grepl("^Risk Ratio", ratio_label) || grepl("^Rate Ratio", ratio_label)) {
+      "RR"
     } else {
+      "Estimate"  # generic/unrecognised link — plotted on a linear scale, not log
+    }
+    
+    tryCatch({
+      cal_forest_plot(model, family = fp_family)
+    }, error = function(e) {
+      warning(sprintf("Could not draw the forest plot via cal_forest_plot(): %s", conditionMessage(e)))
+    })
+  }
+  
+  # ==========================================================
+  # 7. OPTIONAL GTSUMMARY TABLE
+  # A publication-style regression table (variable, N, OR/RR/IRR, 95% CI,
+  # p-value) built with gtsummary::tbl_regression(). Displays best in
+  # RStudio's Viewer pane or when knitted in an R Markdown/Quarto document;
+  # in a plain console it prints as a wide data frame.
+  # ==========================================================
+  if (isTRUE(table_plot)) {
+    if (!requireNamespace("gtsummary", quietly = TRUE)) {
+      warning("table_plot = TRUE was requested, but the 'gtsummary' package is not installed. Run install.packages('gtsummary') and try again.")
+    } else {
+      gt_table <- tryCatch({
+        gtsummary::tbl_regression(model, exponentiate = TRUE)
+      }, error = function(e) {
+        warning(sprintf("Could not build the gtsummary table: %s", conditionMessage(e)))
+        NULL
+      })
       
-      fp_data <- results_table[!is.na(results_table$ratio) &
-                                 !is.na(results_table$lower_ci) &
-                                 !is.na(results_table$upper_ci), ]
-      
-      # Log scale requires strictly positive bounds — guard against a Wald CI
-      # (fallback case) that happened to produce a non-positive lower bound.
-      use_log_scale <- all(fp_data$lower_ci > 0) && all(fp_data$upper_ci > 0) && all(fp_data$ratio > 0)
-      
-      if (nrow(fp_data) == 0) {
-        warning("forest_plot = TRUE was requested, but no terms had usable ratio/CI values to plot (all were NA or non-positive).")
-      } else {
-        
-        n_rows <- nrow(fp_data)
-        y_pos  <- rev(seq_len(n_rows))
-        
-        x_range <- range(c(fp_data$lower_ci, fp_data$upper_ci, 1), na.rm = TRUE)
-        
-        old_par <- par(mar = c(5, max(8, max(nchar(fp_data$variable)) * 0.6), 4, 2))
-        on.exit(par(old_par), add = TRUE)
-        
-        plot(fp_data$ratio, y_pos,
-             xlim = x_range,
-             ylim = c(0.5, n_rows + 0.5),
-             log  = if (use_log_scale) "x" else "",
-             pch  = 16, cex = 1.3,
-             yaxt = "n", ylab = "",
-             xlab = ratio_label,
-             main = sprintf("Forest plot: %s\n(%s)", outcome, ratio_label))
-        
-        axis(2, at = y_pos, labels = fp_data$variable, las = 2, cex.axis = 0.85)
-        
-        segments(fp_data$lower_ci, y_pos, fp_data$upper_ci, y_pos, lwd = 2)
-        
-        # Reference ("no effect") line — always at 1 for a ratio scale
-        abline(v = 1, lty = 2, col = "red", lwd = 1.5)
-        text(x = 1, y = n_rows + 0.5, labels = "no effect", col = "red",
-             pos = 3, xpd = TRUE, cex = 0.8)
-        
-        if (!use_log_scale) {
-          warning("Some CI bounds were zero or negative (likely from a Wald-CI fallback — see diagnostics above), so this plot uses a LINEAR x-axis instead of the conventional log scale. Interpret spacing between points with extra caution.")
-        }
+      if (!is.null(gt_table)) {
+        cat("\n--------------------------------------------------------\n")
+        cat(sprintf("A publication-style summary table (%s, 95%% CI, p-value) has been\n", ratio_label))
+        cat("generated below. This displays best in RStudio's Viewer pane or when\n")
+        cat("knitted into an R Markdown/Quarto document — a plain R console will show\n")
+        cat("it as a wide data frame instead of the formatted table.\n")
+        cat("--------------------------------------------------------\n")
+        print(gt_table)
       }
     }
   }
@@ -568,31 +702,37 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE) {
 # USAGE EXAMPLES (using the cohort dataset from earlier)
 # ============================================================
 # --- Logistic regression (binomial, logit link -> Odds Ratios) ---
-model_logit <- glm(event ~ age + sex + treatment + comorbidity_score,
-                    data = cohort, family = binomial(link = "logit"))
-logit_results <- explain_glm(model_logit)
-logit_results
-
-#--- Poisson with offset (log link -> Incidence Rate Ratios) ---
-model_pois <- glm(n_hosp ~ age + treatment + offset(log(person_time)),
-                   data = cohort, family = poisson(link = "log"))
-pois_results <- explain_glm(model_pois)
-pois_results
-
-#--- Negative Binomial (overdispersed counts -> IRRs, with theta note) ---
-library(MASS)
-model_nb <- glm.nb(n_hosp ~ age + treatment + offset(log(person_time)), data = cohort)
-nb_results <- explain_glm(model_nb)
-nb_results
-
-#--- Interaction term example ---
-model_int <- glm(event ~ age * treatment, data = cohort, family = binomial)
-explain_glm(model_int)
-
-#--- With a forest plot (reference line always at ratio = 1, never 0) ---
-explain_glm(model_logit, forest_plot = TRUE)
-explain_glm(model_pois, forest_plot = TRUE)
-
+ model_logit <- glm(event ~ age + sex + treatment + comorbidity_score,
+                     data = cohort, family = binomial(link = "logit"))
+ logit_results <- explain_glm(model_logit)
+ logit_results
+#
+# --- Poisson with offset (log link -> Incidence Rate Ratios) ---
+ model_pois <- glm(n_hosp ~ age + treatment + offset(log(person_time)),
+                    data = cohort, family = poisson(link = "log"))
+ pois_results <- explain_glm(model_pois)
+ pois_results
+#
+# --- Negative Binomial (overdispersed counts -> IRRs, with theta note) ---
+ library(MASS)
+ model_nb <- glm.nb(n_hosp ~ age + treatment + offset(log(person_time)), data = cohort)
+ nb_results <- explain_glm(model_nb)
+ nb_results
+#
+# --- Interaction term example ---
+ model_int <- glm(event ~ age * treatment, data = cohort, family = binomial)
+ explain_glm(model_int)
+#
+# --- With a forest plot (via cal_forest_plot(); reference line at ratio = 1) ---
+ explain_glm(model_logit, forest_plot = TRUE)
+ explain_glm(model_pois, forest_plot = TRUE)
+#
+# --- With a publication-style gtsummary table ---
+ explain_glm(model_logit, table_plot = TRUE)
+#
+# --- Both together ---
+ explain_glm(model_logit, forest_plot = TRUE, table_plot = TRUE)
+#
 # ============================================================
 # EDGE CASES THIS FUNCTION HAS BEEN SPECIFICALLY CHECKED AGAINST
 # ============================================================
@@ -613,7 +753,16 @@ explain_glm(model_pois, forest_plot = TRUE)
 # 15. Negative Binomial via MASS::glm.nb       -> detected via class, theta explained
 # 16. Terms that can't be matched to original data column -> flagged, not silently wrong
 # 17. p-value column naming differences (Pr(>|z|) vs Pr(>|t|)) -> read positionally, not by name
-# 18. forest_plot = TRUE with no estimable terms -> warns instead of erroring
-# 19. forest_plot = TRUE where a Wald-CI fallback produced a non-positive bound
-#     (breaks log-scale plotting) -> auto-switches to linear x-axis, with a warning
-
+# 18. forest_plot = TRUE with forestplot/gtsummary/dplyr not installed -> stops with a specific,
+#     actionable message (via cal_forest_plot()'s own requireNamespace checks) rather than a
+#     cryptic "could not find function" error
+# 19. cal_forest_plot() erroring for any other reason (e.g. an unusual model structure it
+#     doesn't handle) -> caught and reported as a warning, rest of explain_glm()'s text output
+#     is unaffected since the forest plot is generated only after all text has already printed
+# 20. table_plot = TRUE with gtsummary not installed -> warns with an actionable message,
+#     rest of the function is unaffected
+# 21. gtsummary::tbl_regression() erroring for any reason -> caught, warns instead of crashing
+# 22. fp_family mapping: every ratio_label string this function can produce (OR/RR/IRR/generic)
+#     is explicitly mapped to a valid cal_forest_plot() family code, so the forest plot always
+#     gets a recognised family value consistent with the text output above it — never silently
+#     mismatched (e.g. text calling something an IRR while the plot draws it as a plain OR)

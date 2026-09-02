@@ -1,5 +1,8 @@
 # 00_build_cohort
 
+library(tidyverse)
+
+
 # ============================================================
 # R MODELLING ROADMAP — ONE DATASET, NAMED OUTPUT OBJECTS
 # Every modelling step below assigns its result to a clearly
@@ -69,3 +72,29 @@ cohort_long$hi_bp <- rbinom(n * visits, 1,
 out_cohort_head      <- head(cohort)
 out_cohort_str       <- str(cohort)
 out_cohort_long_head <- head(cohort_long)
+
+
+
+
+
+
+
+
+# ----------------------------
+# Create predictor matrix
+# ----------------------------
+
+x_xgb <- cohort %>%
+select(
+  age,
+  bmi,
+  comorbidity_score,
+  starts_with("marker")
+) %>%
+as.matrix()
+
+# Binary outcome
+y_xgb <- cohort$event
+
+
+
