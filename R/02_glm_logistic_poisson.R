@@ -704,7 +704,7 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
 # --- Logistic regression (binomial, logit link -> Odds Ratios) ---
  model_logit <- glm(event ~ age + sex + treatment + comorbidity_score,
                      data = cohort, family = binomial(link = "logit"))
- logit_results <- explain_glm(model_logit)
+ logit_results <- explain_glm(model_logit, forest_plot = TRUE, table_plot = TRUE)
  logit_results
 #
 # --- Poisson with offset (log link -> Incidence Rate Ratios) ---
@@ -721,7 +721,7 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
 #
 # --- Interaction term example ---
  model_int <- glm(event ~ age * treatment, data = cohort, family = binomial)
- explain_glm(model_int)
+ explain_glm(model_int, forest_plot = TRUE, table_plot = TRUE)
 #
 # --- With a forest plot (via cal_forest_plot(); reference line at ratio = 1) ---
  explain_glm(model_logit, forest_plot = TRUE)
