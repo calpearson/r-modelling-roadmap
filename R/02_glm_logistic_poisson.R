@@ -1,31 +1,3 @@
-# 02_glm_logistic_poisson
-
-# ============================================================
-# 2. GLMs — outcome: event (logistic), n_hosp (Poisson/NegBin)
-# ============================================================
-model_logit <- glm(event ~ age + sex + treatment + comorbidity_score,
-                   data = cohort, family = binomial(link = "logit"))
-
-out_logit_summary <- summary(model_logit)
-out_logit_or      <- exp(coef(model_logit))       # odds ratios
-out_logit_or_ci   <- exp(confint(model_logit))
-
-out_logit_summary
-out_logit_or
-out_logit_or_ci
-
-model_pois <- glm(n_hosp ~ age + treatment + offset(log(person_time)),
-                  data = cohort, family = poisson(link = "log"))
-out_pois_summary <- summary(model_pois)
-out_pois_summary
-
-library(MASS)
-model_nb <- glm.nb(n_hosp ~ age + treatment + offset(log(person_time)), data = cohort)
-out_nb_summary <- summary(model_nb)
-out_nb_summary
-
-
-
 # ============================================================
 # explain_glm() — plain-language interpretation of a glm() /
 # MASS::glm.nb() model. Handles logistic (binomial/logit),
@@ -56,9 +28,14 @@ out_nb_summary
 #    IRR); this is different from 0, which is only the null value on
 #    the raw, un-exponentiated log-coefficient scale.
 #  - Optionally builds a publication-style gtsummary table (table_plot = TRUE)
+#  - Optionally plots how the predicted outcome diverges across a 2-way
+#    interaction term (show_interaction = TRUE) — e.g. age on the x-axis,
+#    one line per sex, showing how the two variables' effects combine
 #
 # REQUIRED PACKAGES for forest_plot/table_plot: forestplot, gtsummary, dplyr
 #   install.packages(c("forestplot", "gtsummary", "dplyr"))
+# REQUIRED PACKAGE for show_interaction: ggplot2
+#   install.packages("ggplot2")
 # ============================================================
 
 # ---- Bold-text helper (safe if crayon isn't installed) ----
@@ -207,7 +184,205 @@ cal_forest_plot <- function(fit_or_tbl,
 }
 
 
-explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plot = FALSE) {
+# ============================================================
+# .build_glm_interaction_plot() — internal helper for show_interaction.
+# Builds a prediction grid across two interacting variables (holding
+# every OTHER predictor at a reference value: mean for continuous,
+# reference/first level for factors), gets predicted values on the
+# RESPONSE scale (probability/rate — whatever the model's family
+# implies), and plots how they diverge. Handles three cases
+# differently, since one plot shape doesn't fit all of them:
+#   continuous x factor   -> line plot, x = continuous, one line per
+#                             factor level (e.g. age on x, one line
+#                             per sex) — this is the classic case
+#   factor x factor       -> grouped bar chart
+#   continuous x continuous -> line plot at low/median/high (10th/
+#                             50th/90th percentile) of the second variable
+# Returns a ggplot object, or NULL (with a warning explaining why) if
+# it can't be built.
+# ============================================================
+.build_glm_interaction_plot <- function(model, var1, var2, term_labels,
+                                        ratio_noun, outcome, family_name, link_name,
+                                        has_offset, offset_expr, offset_is_log) {
+  
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    warning("show_interaction = TRUE requires the 'ggplot2' package. Run install.packages('ggplot2') and try again.")
+    return(NULL)
+  }
+  
+  md <- model$model
+  if (!(var1 %in% names(md)) || !(var2 %in% names(md))) {
+    warning(sprintf("Could not build an interaction figure for %s:%s — one or both variables could not be found in the model's data.", var1, var2))
+    return(NULL)
+  }
+  
+  main_labels <- term_labels[!grepl(":", term_labels, fixed = TRUE)]
+  is_factor1 <- is.factor(md[[var1]])
+  is_factor2 <- is.factor(md[[var2]])
+  
+  # ---- Reference values for every OTHER main-effect predictor ----
+  other_vars <- setdiff(main_labels, c(var1, var2))
+  
+  set_reference_values <- function(df) {
+    for (ov in other_vars) {
+      if (!(ov %in% names(md))) next  # e.g. a transformed term whose underlying variable can't be cleanly resolved — skipped, held at whatever predict()'s own defaulting does
+      if (is.factor(md[[ov]])) {
+        df[[ov]] <- factor(levels(md[[ov]])[1], levels = levels(md[[ov]]))
+      } else {
+        df[[ov]] <- mean(md[[ov]], na.rm = TRUE)
+      }
+    }
+    df
+  }
+  
+  # ---- Offset handling: hold the underlying exposure-time variable at its
+  # median, so the plot shows predicted rates for a "typical" follow-up time
+  # rather than an arbitrary/unset value that could distort the numbers ----
+  offset_varname <- NA
+  offset_note <- ""
+  if (has_offset) {
+    inner <- sub("^offset\\((.*)\\)$", "\\1", offset_expr)
+    inner <- sub("^log\\((.*)\\)$", "\\1", inner)
+    offset_varname <- trimws(inner)
+    if (!(offset_varname %in% names(md))) offset_varname <- NA
+  }
+  set_offset_reference <- function(df) {
+    if (!is.na(offset_varname)) {
+      ref_val <- stats::median(md[[offset_varname]], na.rm = TRUE)
+      df[[offset_varname]] <- ref_val
+      offset_note <<- sprintf(" (assuming %s = %s, the median follow-up time)",
+                              offset_varname, signif(ref_val, 3))
+    }
+    df
+  }
+  
+  # ---- Upper bound for the CI ribbon: probabilities can't exceed 1 ----
+  is_probability_scale <- grepl("^(binomial|quasibinomial)", family_name) &&
+    link_name %in% c("logit", "log")
+  upper_bound <- if (is_probability_scale) 1 else Inf
+  
+  y_lab <- sprintf("Predicted %s of %s", ratio_noun, outcome)
+  
+  get_predictions <- function(grid) {
+    tryCatch(predict(model, newdata = grid, type = "response", se.fit = TRUE),
+             error = function(e) NULL)
+  }
+  
+  # ==========================================================
+  # CASE 1: continuous x factor (either order) — line plot, one line per level
+  # ==========================================================
+  if (xor(is_factor1, is_factor2)) {
+    cont_var  <- if (is_factor1) var2 else var1
+    fact_var  <- if (is_factor1) var1 else var2
+    
+    cont_seq <- seq(min(md[[cont_var]], na.rm = TRUE), max(md[[cont_var]], na.rm = TRUE), length.out = 50)
+    fact_lvls <- levels(md[[fact_var]])
+    
+    grid <- expand.grid(setNames(list(cont_seq, fact_lvls), c(cont_var, fact_var)), stringsAsFactors = FALSE)
+    grid[[fact_var]] <- factor(grid[[fact_var]], levels = fact_lvls)
+    grid <- set_reference_values(grid)
+    grid <- set_offset_reference(grid)
+    
+    preds <- get_predictions(grid)
+    if (is.null(preds)) {
+      warning(sprintf("Could not generate predictions for the %s:%s interaction figure.", var1, var2))
+      return(NULL)
+    }
+    grid$fit <- preds$fit
+    grid$lo  <- pmax(0, preds$fit - 1.96 * preds$se.fit)
+    grid$hi  <- pmin(upper_bound, preds$fit + 1.96 * preds$se.fit)
+    
+    p <- ggplot2::ggplot(grid, ggplot2::aes(x = .data[[cont_var]], y = fit,
+                                            color = .data[[fact_var]], fill = .data[[fact_var]])) +
+      ggplot2::geom_ribbon(ggplot2::aes(ymin = lo, ymax = hi), alpha = 0.15, color = NA) +
+      ggplot2::geom_line(linewidth = 1) +
+      ggplot2::labs(title = sprintf("Interaction: %s x %s", var1, var2),
+                    subtitle = sprintf("Predicted %s of %s across %s, separately by %s%s (shaded band = approx. 95%% CI)",
+                                       ratio_noun, outcome, cont_var, fact_var, offset_note),
+                    x = cont_var, y = y_lab, color = fact_var, fill = fact_var) +
+      ggplot2::theme_minimal(base_size = 13)
+    return(p)
+  }
+  
+  # ==========================================================
+  # CASE 2: factor x factor — grouped bar chart
+  # ==========================================================
+  if (is_factor1 && is_factor2) {
+    grid <- expand.grid(setNames(list(levels(md[[var1]]), levels(md[[var2]])), c(var1, var2)),
+                        stringsAsFactors = FALSE)
+    grid[[var1]] <- factor(grid[[var1]], levels = levels(md[[var1]]))
+    grid[[var2]] <- factor(grid[[var2]], levels = levels(md[[var2]]))
+    grid <- set_reference_values(grid)
+    grid <- set_offset_reference(grid)
+    
+    preds <- get_predictions(grid)
+    if (is.null(preds)) {
+      warning(sprintf("Could not generate predictions for the %s:%s interaction figure.", var1, var2))
+      return(NULL)
+    }
+    grid$fit <- preds$fit
+    grid$lo  <- pmax(0, preds$fit - 1.96 * preds$se.fit)
+    grid$hi  <- pmin(upper_bound, preds$fit + 1.96 * preds$se.fit)
+    
+    p <- ggplot2::ggplot(grid, ggplot2::aes(x = .data[[var1]], y = fit, fill = .data[[var2]])) +
+      ggplot2::geom_col(position = ggplot2::position_dodge(width = 0.8), width = 0.7) +
+      ggplot2::geom_errorbar(ggplot2::aes(ymin = lo, ymax = hi),
+                             position = ggplot2::position_dodge(width = 0.8), width = 0.2) +
+      ggplot2::labs(title = sprintf("Interaction: %s x %s", var1, var2),
+                    subtitle = sprintf("Predicted %s of %s by %s and %s%s (error bars = approx. 95%% CI)",
+                                       ratio_noun, outcome, var1, var2, offset_note),
+                    x = var1, y = y_lab, fill = var2) +
+      ggplot2::theme_minimal(base_size = 13)
+    return(p)
+  }
+  
+  # ==========================================================
+  # CASE 3: continuous x continuous — line plot at low/median/high
+  # (10th/50th/90th percentile) of var2, since a full 2D surface is
+  # harder to read at a glance than a handful of representative lines
+  # ==========================================================
+  seq1 <- seq(min(md[[var1]], na.rm = TRUE), max(md[[var1]], na.rm = TRUE), length.out = 50)
+  qs <- stats::quantile(md[[var2]], probs = c(0.1, 0.5, 0.9), na.rm = TRUE, type = 7)
+  qs_labels_full <- c("10th pct", "median", "90th pct")
+  
+  if (length(unique(qs)) < length(qs)) {
+    # Skewed/discrete distributions can collapse two percentiles to the same value
+    # (e.g. many tied values in comorbidity_score) — factor(levels = qs) would
+    # otherwise error on duplicate levels, so de-duplicate defensively here.
+    keep <- !duplicated(qs)
+    qs <- qs[keep]
+    qs_labels_full <- qs_labels_full[keep]
+  }
+  
+  grid <- expand.grid(setNames(list(seq1, qs), c(var1, var2)))
+  grid <- set_reference_values(grid)
+  grid <- set_offset_reference(grid)
+  
+  preds <- get_predictions(grid)
+  if (is.null(preds)) {
+    warning(sprintf("Could not generate predictions for the %s:%s interaction figure.", var1, var2))
+    return(NULL)
+  }
+  grid$fit <- preds$fit
+  grid$lo  <- pmax(0, preds$fit - 1.96 * preds$se.fit)
+  grid$hi  <- pmin(upper_bound, preds$fit + 1.96 * preds$se.fit)
+  grid$group <- factor(grid[[var2]],
+                       levels = qs,
+                       labels = sprintf("%s = %.1f (%s)", var2, qs, qs_labels_full))
+  
+  p <- ggplot2::ggplot(grid, ggplot2::aes(x = .data[[var1]], y = fit, color = group, fill = group)) +
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = lo, ymax = hi), alpha = 0.15, color = NA) +
+    ggplot2::geom_line(linewidth = 1) +
+    ggplot2::labs(title = sprintf("Interaction: %s x %s", var1, var2),
+                  subtitle = sprintf("Predicted %s of %s across %s, at low/median/high %s%s (shaded band = approx. 95%% CI)",
+                                     ratio_noun, outcome, var1, var2, offset_note),
+                  x = var1, y = y_lab, color = NULL, fill = NULL) +
+    ggplot2::theme_minimal(base_size = 13)
+  p
+}
+
+
+explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plot = FALSE, show_interaction = FALSE) {
   
   # ==========================================================
   # 0. VALIDITY CHECK — is this even a model type we can handle?
@@ -465,6 +640,7 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
   cat("--------------------------------------------------------\n")
   
   results_rows <- list()
+  interaction_pairs <- list()  # collected here, plotted later if show_interaction = TRUE
   
   for (i in seq_along(var_names)) {
     
@@ -516,6 +692,26 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
                     parts[1], parts[2]))
         cat(sprintf("  close to 1, the two variables act roughly independently of each other;\n"))
         cat(sprintf("  the further from 1, the more they modify each other's effect.\n"))
+        
+        # Resolve each piece back to its base data-column variable name (a factor
+        # piece like "sexM" needs to resolve to "sex"; a continuous piece like
+        # "age" already equals its own base name), same matching approach used
+        # for main-effect terms above — so show_interaction knows exactly which
+        # two original variables to build a prediction grid across.
+        resolve_base_var <- function(piece) {
+          m <- main_labels[sapply(main_labels, function(p) startsWith(piece, p))]
+          if (length(m) == 0) return(NA_character_)
+          m[which.max(nchar(m))]
+        }
+        base_var1 <- resolve_base_var(parts[1])
+        base_var2 <- resolve_base_var(parts[2])
+        
+        if (!is.na(base_var1) && !is.na(base_var2)) {
+          interaction_pairs[[length(interaction_pairs) + 1]] <- list(var1 = base_var1, var2 = base_var2, term = vn)
+        } else {
+          cat(sprintf("  (Note: could not automatically resolve this interaction's variables for a\n"))
+          cat(sprintf("  figure — if show_interaction = TRUE, this term will be skipped.)\n"))
+        }
       } else {
         cat(sprintf("  This is a higher-order interaction between %d variables (%s).\n",
                     length(parts), paste(parts, collapse = ", ")))
@@ -636,7 +832,36 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
   results_table <- do.call(rbind, results_rows)
   
   # ==========================================================
-  # 6. OPTIONAL FOREST PLOT (via cal_forest_plot() — gtsummary + forestplot)
+  # 6. OPTIONAL INTERACTION FIGURE(S)
+  # For each clean 2-way interaction found above, plots how the predicted
+  # outcome (on the response scale — probability/rate, matching what the
+  # rest of this function reports) diverges across the two variables,
+  # holding every other predictor at a reference value (mean for
+  # continuous, reference level for factors).
+  # ==========================================================
+  if (isTRUE(show_interaction)) {
+    if (length(interaction_pairs) == 0) {
+      cat("\n(show_interaction = TRUE was requested, but this model has no 2-way\n")
+      cat("interaction terms to plot.)\n")
+    } else {
+      for (ip in interaction_pairs) {
+        cat(sprintf("\nGenerating interaction figure for %s...\n", ip$term))
+        p_int <- tryCatch(
+          .build_glm_interaction_plot(model, ip$var1, ip$var2, term_labels,
+                                      ratio_noun, outcome, family_name, link_name,
+                                      has_offset, offset_expr, offset_is_log),
+          error = function(e) {
+            warning(sprintf("Could not build the interaction figure for %s: %s", ip$term, conditionMessage(e)))
+            NULL
+          }
+        )
+        if (!is.null(p_int)) print(p_int)
+      }
+    }
+  }
+  
+  # ==========================================================
+  # 7. OPTIONAL FOREST PLOT (via cal_forest_plot() — gtsummary + forestplot)
   # Reference/"no effect" line is drawn at 1 on the log-scaled axis for
   # ratio measures (OR/RR/IRR) — 1 is the null value for ANY ratio; the
   # log axis (xlog = TRUE inside cal_forest_plot) is what makes that
@@ -654,7 +879,28 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
     } else if (grepl("^Risk Ratio", ratio_label) || grepl("^Rate Ratio", ratio_label)) {
       "RR"
     } else {
-      "Estimate"  # generic/unrecognised link — plotted on a linear scale, not log
+      "Estimate"  # generic/unrecognised link
+    }
+    
+    # NOTE on exponentiate: this is intentionally left at cal_forest_plot()'s own
+    # default (exponentiate = TRUE) for EVERY case, including the generic
+    # "Estimate" fallback. This matches the PER-VARIABLE TEXT OUTPUT above (section
+    # 5), which also unconditionally exponentiates every coefficient regardless of
+    # family/link — the plot and the text need to agree with each other above all
+    # else. For an unusual link (e.g. a plain gaussian/identity glm, which would
+    # fall into this generic branch), exponentiating a raw coefficient does NOT
+    # have a standard "ratio" interpretation — this is a known limitation carried
+    # through from the original design of explain_glm()'s text output, not
+    # something newly introduced by the forest plot. If you use explain_glm() on
+    # a genuinely raw-scale (identity link) model, treat both the text AND the
+    # plot's numbers with real caution for that specific case.
+    if (fp_family == "RR" && grepl("^Rate Ratio", ratio_label)) {
+      cat("\nNote: this model's ratio is a Poisson/Negative Binomial RATE RATIO, but\n")
+      cat("cal_forest_plot()'s x-axis will be labeled 'Risk Ratio' (it does not\n")
+      cat("distinguish rate ratios from risk ratios internally) — the numbers and log\n")
+      cat("scale are correct, only that axis label's wording is imprecise for a count\n")
+      cat("outcome. Edit cal_forest_plot()'s internal `xlab` switch statement if you\n")
+      cat("want it to say 'Rate Ratio' specifically for this case.\n\n")
     }
     
     tryCatch({
@@ -665,7 +911,7 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
   }
   
   # ==========================================================
-  # 7. OPTIONAL GTSUMMARY TABLE
+  # 8. OPTIONAL GTSUMMARY TABLE
   # A publication-style regression table (variable, N, OR/RR/IRR, 95% CI,
   # p-value) built with gtsummary::tbl_regression(). Displays best in
   # RStudio's Viewer pane or when knitted in an R Markdown/Quarto document;
@@ -702,36 +948,47 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
 # USAGE EXAMPLES (using the cohort dataset from earlier)
 # ============================================================
 # --- Logistic regression (binomial, logit link -> Odds Ratios) ---
- model_logit <- glm(event ~ age + sex + treatment + comorbidity_score,
-                     data = cohort, family = binomial(link = "logit"))
- logit_results <- explain_glm(model_logit, forest_plot = TRUE, table_plot = TRUE)
- logit_results
+model_logit <- glm(event ~ age + sex + treatment + comorbidity_score,
+                   data = cohort, family = binomial(link = "logit"))
+logit_results <- explain_glm(model_logit)
+logit_results
 #
 # --- Poisson with offset (log link -> Incidence Rate Ratios) ---
- model_pois <- glm(n_hosp ~ age + treatment + offset(log(person_time)),
-                    data = cohort, family = poisson(link = "log"))
- pois_results <- explain_glm(model_pois)
- pois_results
-#
+model_pois <- glm(n_hosp ~ age + treatment + offset(log(person_time)),
+                  data = cohort, family = poisson(link = "log"))
+pois_results <- explain_glm(model_pois)
+pois_results
+
 # --- Negative Binomial (overdispersed counts -> IRRs, with theta note) ---
- library(MASS)
- model_nb <- glm.nb(n_hosp ~ age + treatment + offset(log(person_time)), data = cohort)
- nb_results <- explain_glm(model_nb)
- nb_results
+library(MASS)
+model_nb <- glm.nb(n_hosp ~ age + treatment + offset(log(person_time)), data = cohort)
+nb_results <- explain_glm(model_nb)
+nb_results
 #
 # --- Interaction term example ---
- model_int <- glm(event ~ age * treatment, data = cohort, family = binomial)
- explain_glm(model_int, forest_plot = TRUE, table_plot = TRUE)
+model_int <- glm(event ~ age * treatment, data = cohort, family = binomial)
+explain_glm(model_int)
+#
+# --- With the interaction figure (age on x-axis, one line per treatment group) ---
+explain_glm(model_int, show_interaction = TRUE)
+#
+# --- A continuous x continuous interaction (age * bmi) — plotted at low/median/high bmi ---
+model_int2 <- glm(event ~ age * bmi, data = cohort, family = binomial)
+explain_glm(model_int2, show_interaction = TRUE)
+#
+# --- A factor x factor interaction (sex * treatment) — plotted as a grouped bar chart ---
+model_int3 <- glm(event ~ sex * age, data = cohort, family = binomial)
+explain_glm(model_int3, show_interaction = TRUE)
 #
 # --- With a forest plot (via cal_forest_plot(); reference line at ratio = 1) ---
- explain_glm(model_logit, forest_plot = TRUE)
- explain_glm(model_pois, forest_plot = TRUE)
+explain_glm(model_logit, forest_plot = TRUE)
+explain_glm(model_pois, forest_plot = TRUE)
 #
 # --- With a publication-style gtsummary table ---
- explain_glm(model_logit, table_plot = TRUE)
+explain_glm(model_logit, table_plot = TRUE)
 #
 # --- Both together ---
- explain_glm(model_logit, forest_plot = TRUE, table_plot = TRUE)
+explain_glm(model_logit, forest_plot = TRUE, table_plot = TRUE)
 #
 # ============================================================
 # EDGE CASES THIS FUNCTION HAS BEEN SPECIFICALLY CHECKED AGAINST
@@ -766,3 +1023,28 @@ explain_glm <- function(model, conf_level = 0.95, forest_plot = FALSE, table_plo
 #     is explicitly mapped to a valid cal_forest_plot() family code, so the forest plot always
 #     gets a recognised family value consistent with the text output above it — never silently
 #     mismatched (e.g. text calling something an IRR while the plot draws it as a plain OR)
+# 23. show_interaction = TRUE with no 2-way interaction terms in the model -> a specific message
+#     is printed instead of silently doing nothing
+# 24. show_interaction = TRUE with ggplot2 not installed -> warns with an actionable message,
+#     the rest of explain_glm()'s output is unaffected
+# 25. An interaction piece (e.g. "sexM") that can't be resolved back to its original data column
+#     -> flagged in the text output at the point it's detected, and that specific interaction is
+#     skipped for plotting rather than silently building a wrong or empty grid
+# 26. Every combination of variable types in the interaction is handled explicitly and
+#     differently: continuous x factor (line plot, one line per level — the classic case),
+#     factor x factor (grouped bar chart), continuous x continuous (line plot at low/median/high
+#     percentile of the second variable) — never assumed to be one shape for all three
+# 27. A model with an offset (e.g. Poisson rate models) -> the underlying exposure-time variable
+#     is held at its MEDIAN in the prediction grid (not left unset, which would silently break
+#     predict() or produce a meaningless reference value), with the assumed value stated directly
+#     in the plot's subtitle
+# 28. Predicted-probability confidence ribbons for binomial models are clamped to [0, 1] (a
+#     probability can't exceed 1 or go below 0), rather than a symmetric Wald interval spilling
+#     outside the valid range on the plot
+# 29. predict() failing on the constructed grid for any reason (e.g. a transformed/derived term
+#     that can't be reconstructed from the grid's raw variables) -> caught, warns with the
+#     specific interaction term named, that one figure is skipped rather than crashing the
+#     whole function
+# 30. A transformed term (e.g. log(bmi)) appearing among the "other" predictors being held at a
+#     reference value -> its underlying variable can't always be cleanly resolved by name, so it
+#     is left for predict()'s own default handling rather than the function guessing incorrectly
