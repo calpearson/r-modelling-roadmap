@@ -390,15 +390,15 @@ explain_study_design <- function(
 
 
 
-
+# Example question: "Does having chronic lung disease increase the risk of influenza hospitalisation?"
 # Cohort Example
 result <- explain_study_design(
   design = "cohort_rr",
-  baseline_risk = 0.05,
-  rr = 2,
-  power = 0.8,
-  alpha = 0.05,
-  attrition = 0.10,
+  baseline_risk = 0.05, # Among people without chronic lung disease, 5 in every 100 are expected to be hospitalised with influenza.
+  rr = 2, # You believe those with chronic lung disease have twice the risk. (No lung disease → 5% hospitalised / Lung disease → 10% hospitalised)
+  power = 0.8, # If this difference truly exists (5% vs 10%), the study has an 80% chance of detecting it.
+  alpha = 0.05, # Accept a 5% chance of concluding there is a difference when none actually exists.
+  attrition = 0.10, # Allow for 10% of participants being lost to follow-up or having missing outcome data.
   show_plot = TRUE,
   show_table = TRUE
 )
@@ -457,4 +457,4 @@ result <- explain_study_design(
 )
 result$table
 result$plot
-
+cat(result$interpretation)
