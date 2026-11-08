@@ -1008,24 +1008,44 @@ explain_cox <- function(model, zph = NULL, conf_level = 0.95,
 # ============================================================
 # USAGE EXAMPLES (using the cohort dataset from earlier)
 # ============================================================
+
+# Among patients in the cohort, does treatment affect the time until the event occurs, 
+# and does this association persist after adjusting for age, sex, and comorbidity burden?
+
+
+
 library(survival)
 
+#......................
+# Survival fit analysis
+#......................
+# Question: Do patients receiving different treatments have different event-free survival over time?
+
 out_km_fit     <- survfit(Surv(time, status) ~ treatment, data = cohort)
+# What proportion of patients remain event-free over time?
 out_km_logrank <- survdiff(Surv(time, status) ~ treatment, data = cohort)
+# Are the survival curves statistically different?
 
 # Unified call — matches the pattern you liked:
 explain_km(fit = out_km_fit, logrank = out_km_logrank, data = cohort,
            km_plot = TRUE, cumulative_plot = TRUE,
            forest_plot = TRUE, table_plot = TRUE)
 
+#.............
+# Cox survival
+#.............
+# Question: After adjusting for age, sex, treatment, and comorbidity score, which factors are associated with the hazard of experiencing the event?
 model_cox   <- coxph(Surv(time, status) ~ age + sex + treatment + comorbidity_score,
                      data = cohort)
+# What factors are associated with a higher or lower hazard of the event?
 out_cox_zph <- cox.zph(model_cox)
+# Are those hazard ratios stable throughout follow-up?
 
 explain_cox(model = model_cox, zph = out_cox_zph,
             forest_plot = TRUE, table_plot = TRUE,
             survival_plot = TRUE, by_variable = "treatment",
             ph_plot = TRUE)
+
 
 # Standalone equivalents still work if you only want one piece:
 explain_logrank(out_km_logrank)
@@ -1077,3 +1097,342 @@ explain_cox_zph(out_cox_zph)
 # 19. survminer::ggcoxzph() failing                            -> falls back to base R's
 #     plot(cox.zph(...)) rather than losing the figure entirely
 # ============================================================
+
+
+help_surv_analysis <- function(){
+  
+  cat("=====================================================\n")
+  cat("        SURVIVAL ANALYSIS QUESTION GENERATOR\n")
+  cat("=====================================================\n\n")
+  
+  cat("WHEN SHOULD SURVIVAL ANALYSIS BE USED?\n")
+  cat("-------------------------------------\n")
+  cat("Use survival analysis when:\n")
+  cat("- The outcome is time until an event occurs.\n")
+  cat("- Not everyone experiences the event.\n")
+  cat("- Follow-up times differ between individuals.\n")
+  cat("- Censoring is present.\n")
+  cat("- You are interested in risk over time rather than simply whether an event occurred.\n\n")
+  
+  cat("COMMON METHODS\n")
+  cat("--------------\n")
+  cat("survfit()   : What proportion remain event-free over time?\n")
+  cat("survdiff()  : Are survival curves different between groups?\n")
+  cat("coxph()     : Which factors affect the hazard of the event?\n")
+  cat("cox.zph()   : Are hazard ratios stable over time?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("PHARMACOEPIDEMIOLOGY\n")
+  cat("=====================================================\n\n")
+  
+  cat("1. Does statin therapy delay time to first myocardial infarction?\n")
+  cat("2. Does semaglutide delay progression to insulin initiation?\n")
+  cat("3. Does anticoagulation reduce time to stroke among AF patients?\n")
+  cat("4. Does inhaled corticosteroid use delay severe asthma exacerbation?\n")
+  cat("5. Does antibiotic prophylaxis delay recurrent UTI?\n")
+  cat("6. Does treatment A prolong time until treatment failure versus treatment B?\n")
+  cat("7. Does vaccination delay time to laboratory-confirmed infection?\n")
+  cat("8. Does antihypertensive treatment delay cardiovascular events?\n")
+  cat("9. Does biologic therapy delay Crohn's disease flare?\n")
+  cat("10. Does antiviral treatment delay hospitalisation following diagnosis?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("HOSPITAL EPIDEMIOLOGY / HCAI\n")
+  cat("=====================================================\n\n")
+  
+  cat("1. Does a central-line bundle delay bloodstream infection?\n")
+  cat("2. Does chlorhexidine bathing delay acquisition of MRSA?\n")
+  cat("3. Does antimicrobial stewardship delay C. difficile infection?\n")
+  cat("4. Does isolation delay transmission of carbapenem-resistant organisms?\n")
+  cat("5. Does rapid PCR testing delay progression to severe infection?\n")
+  cat("6. Does ward redesign delay acquisition of HCAI?\n")
+  cat("7. Does enhanced cleaning delay environmental transmission events?\n")
+  cat("8. Does staff training delay occurrence of device-associated infection?\n")
+  cat("9. Does screening delay outbreak-associated infection?\n")
+  cat("10. Does infection prevention intervention delay readmission due to infection?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("DRUG SAFETY / PHARMACOVIGILANCE\n")
+  cat("=====================================================\n\n")
+  
+  cat("1. Does Drug A increase time to first serious adverse event?\n")
+  cat("2. Does medication exposure alter time to liver toxicity?\n")
+  cat("3. Does treatment affect time to acute kidney injury?\n")
+  cat("4. Does biologic therapy alter time to opportunistic infection?\n")
+  cat("5. Does antidepressant use alter time to treatment discontinuation?\n")
+  cat("6. Does Drug A affect time to gastrointestinal bleeding?\n")
+  cat("7. Does long-term opioid use affect time to overdose?\n")
+  cat("8. Does medication exposure alter time to arrhythmia?\n")
+  cat("9. Does immunosuppression affect time to malignancy?\n")
+  cat("10. Does vaccine exposure affect time to adverse reaction?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("CANCER EPIDEMIOLOGY\n")
+  cat("=====================================================\n\n")
+  
+  cat("1. Does treatment improve overall survival?\n")
+  cat("2. Does therapy delay disease progression?\n")
+  cat("3. Does screening improve cancer-specific survival?\n")
+  cat("4. Does biomarker status affect mortality risk?\n")
+  cat("5. Does smoking affect time to cancer diagnosis?\n")
+  cat("6. Does surgery delay recurrence?\n")
+  cat("7. Does immunotherapy prolong progression-free survival?\n")
+  cat("8. Does radiotherapy improve disease-free survival?\n")
+  cat("9. Does genetic mutation status influence survival?\n")
+  cat("10. Does socioeconomic status affect survival after diagnosis?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("PUBLIC HEALTH EPIDEMIOLOGY\n")
+  cat("=====================================================\n\n")
+  
+  cat("1. Does vaccination delay first infection?\n")
+  cat("2. Does community intervention delay smoking relapse?\n")
+  cat("3. Does deprivation affect time to mortality?\n")
+  cat("4. Does obesity affect time to diabetes diagnosis?\n")
+  cat("5. Does screening delay severe disease outcomes?\n")
+  cat("6. Does education level influence time to cardiovascular disease?\n")
+  cat("7. Does air pollution affect time to respiratory admission?\n")
+  cat("8. Does physical activity delay chronic disease onset?\n")
+  cat("9. Does public health intervention delay infection outbreaks?\n")
+  cat("10. Does housing quality influence time to illness?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("HEALTH SERVICES RESEARCH\n")
+  cat("=====================================================\n\n")
+  
+  cat("1. Does virtual ward care delay readmission?\n")
+  cat("2. Does consultant review reduce time to discharge?\n")
+  cat("3. Does community care delay emergency admission?\n")
+  cat("4. Does integrated care delay hospitalisation?\n")
+  cat("5. Does telemedicine delay disease deterioration?\n")
+  cat("6. Does intervention delay ICU admission?\n")
+  cat("7. Does care pathway redesign delay complications?\n")
+  cat("8. Does specialist follow-up delay reattendance?\n")
+  cat("9. Does discharge support delay readmission?\n")
+  cat("10. Does staffing level affect time to discharge?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("PRIMARY CARE / GP RESEARCH\n")
+  cat("=====================================================\n\n")
+  
+  cat("1. Does intervention delay referral to secondary care?\n")
+  cat("2. Does obesity affect time to hypertension diagnosis?\n")
+  cat("3. Does smoking cessation delay COPD diagnosis?\n")
+  cat("4. Does screening delay hospital admission?\n")
+  cat("5. Does medication adherence delay disease progression?\n")
+  cat("6. Does deprivation influence time to diagnosis?\n")
+  cat("7. Does ethnicity affect time to treatment?\n")
+  cat("8. Does continuity of care delay admission?\n")
+  cat("9. Does vaccination delay respiratory infection?\n")
+  cat("10. Does frailty affect time to care home admission?\n\n")
+  
+  #------------------------------------------------------------------
+  cat("=====================================================\n")
+  cat("WHEN NOT TO USE SURVIVAL ANALYSIS\n")
+  cat("=====================================================\n\n")
+  
+  cat("- Outcome is simply yes/no at a fixed time -> Logistic regression.\n")
+  cat("- Outcome is cost (£) -> Linear regression / GLM.\n")
+  cat("- Outcome is number of events -> Poisson / Negative Binomial.\n")
+  cat("- Outcome is prevalence at one point in time -> Logistic regression.\n")
+  cat("- Outcome has no meaningful time component.\n\n")
+  
+  cat("EPIDEMIOLOGIST RULE OF THUMB\n")
+  cat("----------------------------\n")
+  cat("If your research question starts with:\n")
+  cat("'How long until...?'\n")
+  cat("'Time to...?'\n")
+  cat("'Does X delay...?'\n")
+  cat("'Does X accelerate...?'\n")
+  cat("'What affects the hazard of...?'\n")
+  cat("Then survival analysis is often appropriate.\n")
+  
+  cat("=====================================================\n")
+  cat("WORKED EXAMPLES\n")
+  cat("=====================================================\n\n")
+  
+  cat("PHARMACOEPIDEMIOLOGY\n")
+  cat("-------------------\n")
+  cat("Research question:\n")
+  cat("'Does statin therapy delay time to first myocardial infarction?'\n\n")
+  
+  cat("
+out_km_fit <- survfit(
+  Surv(time_to_mi, mi_event) ~ statin_exposure,
+  data = cohort
+)
+
+out_km_logrank <- survdiff(
+  Surv(time_to_mi, mi_event) ~ statin_exposure,
+  data = cohort
+)
+
+model_cox <- coxph(
+  Surv(time_to_mi, mi_event) ~ age + sex + statin_exposure +
+    smoking + diabetes,
+  data = cohort
+)
+
+out_cox_zph <- cox.zph(model_cox)
+\n\n")
+
+cat("HOSPITAL EPIDEMIOLOGY / HCAI\n")
+cat("----------------------------\n")
+cat("Research question:\n")
+cat("'Does a central-line bundle delay bloodstream infection?'\n\n")
+
+cat("
+out_km_fit <- survfit(
+  Surv(time_to_bsi, bsi_event) ~ bundle_group,
+  data = cohort
+)
+
+out_km_logrank <- survdiff(
+  Surv(time_to_bsi, bsi_event) ~ bundle_group,
+  data = cohort
+)
+
+model_cox <- coxph(
+  Surv(time_to_bsi, bsi_event) ~ age + sex + bundle_group +
+    charlson_score,
+  data = cohort
+)
+
+out_cox_zph <- cox.zph(model_cox)
+\n\n")
+
+cat("DRUG SAFETY / PHARMACOVIGILANCE\n")
+cat("------------------------------\n")
+cat("Research question:\n")
+cat("'Does Drug A increase time to first serious adverse event?'\n\n")
+
+cat("
+out_km_fit <- survfit(
+  Surv(time_to_ae, ae_event) ~ drug_a_exposure,
+  data = cohort
+)
+
+out_km_logrank <- survdiff(
+  Surv(time_to_ae, ae_event) ~ drug_a_exposure,
+  data = cohort
+)
+
+model_cox <- coxph(
+  Surv(time_to_ae, ae_event) ~ age + sex + drug_a_exposure +
+    comorbidity_score,
+  data = cohort
+)
+
+out_cox_zph <- cox.zph(model_cox)
+\n\n")
+
+cat("CANCER EPIDEMIOLOGY\n")
+cat("-------------------\n")
+cat("Research question:\n")
+cat("'Does treatment improve overall survival?'\n\n")
+
+cat("
+out_km_fit <- survfit(
+  Surv(time_to_death, death_event) ~ treatment_group,
+  data = cohort
+)
+
+out_km_logrank <- survdiff(
+  Surv(time_to_death, death_event) ~ treatment_group,
+  data = cohort
+)
+
+model_cox <- coxph(
+  Surv(time_to_death, death_event) ~ age + sex +
+    treatment_group + cancer_stage,
+  data = cohort
+)
+
+out_cox_zph <- cox.zph(model_cox)
+\n\n")
+
+cat("PUBLIC HEALTH EPIDEMIOLOGY\n")
+cat("--------------------------\n")
+cat("Research question:\n")
+cat("'Does vaccination delay first infection?'\n\n")
+
+cat("
+out_km_fit <- survfit(
+  Surv(time_to_infection, infection_event) ~ vaccination_status,
+  data = cohort
+)
+
+out_km_logrank <- survdiff(
+  Surv(time_to_infection, infection_event) ~ vaccination_status,
+  data = cohort
+)
+
+model_cox <- coxph(
+  Surv(time_to_infection, infection_event) ~ age + sex +
+    vaccination_status + deprivation_index,
+  data = cohort
+)
+
+out_cox_zph <- cox.zph(model_cox)
+\n\n")
+
+cat("HEALTH SERVICES RESEARCH\n")
+cat("------------------------\n")
+cat("Research question:\n")
+cat("'Does virtual ward care delay readmission?'\n\n")
+
+cat("
+out_km_fit <- survfit(
+  Surv(time_to_readmission, readmission_event) ~ virtual_ward,
+  data = cohort
+)
+
+out_km_logrank <- survdiff(
+  Surv(time_to_readmission, readmission_event) ~ virtual_ward,
+  data = cohort
+)
+
+model_cox <- coxph(
+  Surv(time_to_readmission, readmission_event) ~ age + sex +
+    virtual_ward + charlson_score,
+  data = cohort
+)
+
+out_cox_zph <- cox.zph(model_cox)
+\n\n")
+
+cat("PRIMARY CARE / GP RESEARCH\n")
+cat("--------------------------\n")
+cat("Research question:\n")
+cat("'Does intervention delay referral to secondary care?'\n\n")
+
+cat("
+out_km_fit <- survfit(
+  Surv(time_to_referral, referral_event) ~ intervention_group,
+  data = cohort
+)
+
+out_km_logrank <- survdiff(
+  Surv(time_to_referral, referral_event) ~ intervention_group,
+  data = cohort
+)
+
+model_cox <- coxph(
+  Surv(time_to_referral, referral_event) ~ age + sex +
+    intervention_group + deprivation_index,
+  data = cohort
+)
+
+out_cox_zph <- cox.zph(model_cox)
+\n\n")
+  
+}
+
+help_surv_analysis()
